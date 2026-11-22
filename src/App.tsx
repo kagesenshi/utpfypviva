@@ -6,6 +6,12 @@ import {
   User, Hash, Settings, History, Trash2, Clock, MessageSquare, ShieldAlert, HelpCircle
 } from 'lucide-react';
 
+declare global {
+  interface Window {
+    pdfjsLib?: any;
+  }
+}
+
 const RUBRIC_CRITERIA = [
   {
     id: "abstract",
@@ -168,8 +174,9 @@ const getSafeApiKey = (userEnteredKey) => {
     return userEnteredKey.trim();
   }
   try {
-    if (typeof process !== 'undefined' && process && process.env && process.env.GEMINI_API_KEY) {
-      return process.env.GEMINI_API_KEY;
+    const proc = (globalThis as any).process;
+    if (proc && proc.env && proc.env.GEMINI_API_KEY) {
+      return proc.env.GEMINI_API_KEY;
     }
   } catch (e) {
     // Process is not defined in standard browser environment
@@ -178,7 +185,48 @@ const getSafeApiKey = (userEnteredKey) => {
 };
 
 const HISTORY_STORAGE_KEY = 'thesis_evaluator_history_v1';
+const CONFIG_STORAGE_KEY = 'thesis_evaluator_ai_config_v1';
 const MAX_HISTORY_ITEMS = 10;
+
+const DEFAULT_AI_CONFIG = {
+  aiProvider: 'gemini',
+  geminiApiKey: '',
+  geminiModel: 'gemini-3-flash-preview',
+  openaiApiKey: '',
+  openaiBaseUrl: 'https://api.openai.com/v1',
+  openaiModel: 'gpt-4o'
+};
+
+const readStoredAiConfig = () => {
+  try {
+    const raw = window.localStorage.getItem(CONFIG_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return {
+          ...DEFAULT_AI_CONFIG,
+          aiProvider: parsed.aiProvider === 'openai' ? 'openai' : 'gemini',
+          geminiApiKey: typeof parsed.geminiApiKey === 'string' ? parsed.geminiApiKey : '',
+          geminiModel: typeof parsed.geminiModel === 'string' && parsed.geminiModel.trim() ? parsed.geminiModel : DEFAULT_AI_CONFIG.geminiModel,
+          openaiApiKey: typeof parsed.openaiApiKey === 'string' ? parsed.openaiApiKey : '',
+          openaiBaseUrl: typeof parsed.openaiBaseUrl === 'string' && parsed.openaiBaseUrl.trim() ? parsed.openaiBaseUrl : DEFAULT_AI_CONFIG.openaiBaseUrl,
+          openaiModel: typeof parsed.openaiModel === 'string' && parsed.openaiModel.trim() ? parsed.openaiModel : DEFAULT_AI_CONFIG.openaiModel
+        };
+      }
+    }
+  } catch (e) {
+    // localStorage may be restricted in sandboxed preview iframes
+  }
+  return { ...DEFAULT_AI_CONFIG };
+};
+
+const writeStoredAiConfig = (config) => {
+  try {
+    window.localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(config));
+  } catch (e) {
+    // Ignore storage errors if localStorage is unavailable
+  }
+};
 
 // Resilient storage helper that survives page refreshes even in sandboxed iframes
 const readStoredHistory = () => {
@@ -230,15 +278,28 @@ export default function App() {
   const [isExtractingPdf, setIsExtractingPdf] = useState(false);
   const [pdfProgress, setPdfProgress] = useState(0);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [hasIncompleteRun, setHasIncompleteRun] = useState(false);
   const [analysisError, setAnalysisError] = useState('');
 
-  // AI Endpoint Config
-  const [aiProvider, setAiProvider] = useState('gemini'); // 'gemini' | 'openai'
-  const [geminiApiKey, setGeminiApiKey] = useState('');
-  const [geminiModel, setGeminiModel] = useState('gemini-3-flash-preview');
-  const [openaiApiKey, setOpenaiApiKey] = useState('');
-  const [openaiBaseUrl, setOpenaiBaseUrl] = useState('https://api.openai.com/v1');
-  const [openaiModel, setOpenaiModel] = useState('gpt-4o');
+  // AI Endpoint Config (persisted in localStorage)
+  const [initialAiConfig] = useState(() => readStoredAiConfig());
+  const [aiProvider, setAiProvider] = useState(initialAiConfig.aiProvider); // 'gemini' | 'openai'
+  const [geminiApiKey, setGeminiApiKey] = useState(initialAiConfig.geminiApiKey);
+  const [geminiModel, setGeminiModel] = useState(initialAiConfig.geminiModel);
+  const [openaiApiKey, setOpenaiApiKey] = useState(initialAiConfig.openaiApiKey);
+  const [openaiBaseUrl, setOpenaiBaseUrl] = useState(initialAiConfig.openaiBaseUrl);
+  const [openaiModel, setOpenaiModel] = useState(initialAiConfig.openaiModel);
+
+  useEffect(() => {
+    writeStoredAiConfig({
+      aiProvider,
+      geminiApiKey,
+      geminiModel,
+      openaiApiKey,
+      openaiBaseUrl,
+      openaiModel
+    });
+  }, [aiProvider, geminiApiKey, geminiModel, openaiApiKey, openaiBaseUrl, openaiModel]);
 
   const [showApiKeyModal, setShowApiKeyModal] = useState(false);
   const [insightDialog, setInsightDialog] = useState(null); // { type: 'strengths' | 'weaknesses', title: string, items: string[] }
@@ -307,6 +368,7 @@ export default function App() {
     setExtractedText(''); // PDF text is excluded from storage
     setActiveHistoryId(entry.id);
     setExpandedItems({});
+    setHasIncompleteRun(false);
     setAnalysisError('');
     setShowHistoryModal(false);
   };
@@ -351,6 +413,7 @@ export default function App() {
     setFileName(file.name);
     setIsExtractingPdf(true);
     setPdfProgress(10);
+    setHasIncompleteRun(false);
     setAnalysisError('');
 
     try {
@@ -381,7 +444,7 @@ export default function App() {
     }
   };
 
-  const runThesisAnalysis = async (textToAnalyze) => {
+  const runThesisAnalysis = async (textToAnalyze, { resume = false } = {}) => {
     if (!textToAnalyze || textToAnalyze.trim().length < 50) {
       setAnalysisError('The thesis text is too short or empty for analysis.');
       return;
@@ -397,14 +460,57 @@ export default function App() {
       ? geminiApiKey.trim()
       : openaiApiKey.trim();
 
+    const isResuming = Boolean(resume && analysis);
+    const existingEvaluations = isResuming && Array.isArray(analysis.criteriaEvaluations)
+      ? [...analysis.criteriaEvaluations]
+      : [];
+
     setIsAnalyzing(true);
+    setHasIncompleteRun(false);
     setAnalysisError('');
-    setAnalysisProgress({ current: 0, total: 11, statusText: 'Initializing thesis evaluation...' });
+    setAnalysisProgress({
+      current: existingEvaluations.length,
+      total: RUBRIC_CRITERIA.length,
+      statusText: isResuming
+        ? `Resuming thesis evaluation (${existingEvaluations.length}/${RUBRIC_CRITERIA.length} completed)...`
+        : 'Initializing thesis evaluation...'
+    });
+
+    if (!isResuming) {
+      setAnalysis(null);
+      setUserScores({});
+      setUserJustifications({});
+      setExpandedItems({});
+      setActiveHistoryId(null);
+    }
 
     try {
-      setAnalysisProgress({ current: 0, total: 11, statusText: 'Extracting student metadata & summary...' });
+      let metaDataObj = isResuming
+        ? {
+            studentName: analysis.studentName || "Not Provided",
+            studentId: analysis.studentId || "Not Provided",
+            thesisTitle: analysis.thesisTitle || "Not Provided",
+            executiveSummary: analysis.executiveSummary || "Evaluation complete.",
+            overallGrade: analysis.overallGrade || "Satisfactory",
+            keyStrengths: Array.isArray(analysis.keyStrengths) ? analysis.keyStrengths : [],
+            keyWeaknesses: Array.isArray(analysis.keyWeaknesses) ? analysis.keyWeaknesses : [],
+            vivaQuestions: Array.isArray(analysis.vivaQuestions) ? analysis.vivaQuestions : []
+          }
+        : {
+            studentName: "Not Provided",
+            studentId: "Not Provided",
+            thesisTitle: "Not Provided",
+            executiveSummary: "Evaluation complete.",
+            overallGrade: "Satisfactory",
+            keyStrengths: [],
+            keyWeaknesses: [],
+            vivaQuestions: []
+          };
 
-      const metadataPrompt = `Extract Student Name, Student ID, and Thesis Title from this thesis document text. Also provide an overall executive summary (2-3 paragraphs), overall letter grade (e.g. A, B+, B, C), key 3 strengths, key 3 weaknesses, and 6 targeted oral defense / viva questions to ask the student.
+      if (!isResuming) {
+        setAnalysisProgress({ current: 0, total: RUBRIC_CRITERIA.length, statusText: 'Extracting student metadata & summary...' });
+
+        const metadataPrompt = `Extract Student Name, Student ID, and Thesis Title from this thesis document text. Also provide an overall executive summary (2-3 paragraphs), overall letter grade (e.g. A, B+, B, C), key 3 strengths, key 3 weaknesses, and 6 targeted oral defense / viva questions to ask the student.
 
 For the 6 viva questions (2 per category), categorize each strictly as one of:
 - "Understanding": Questions that test deep conceptual/technical comprehension of their methodology, design choices, or results.
@@ -414,98 +520,101 @@ For the 6 viva questions (2 per category), categorize each strictly as one of:
 Return JSON format with keys:
 "studentName", "studentId", "thesisTitle", "executiveSummary", "overallGrade", "keyStrengths" (array), "keyWeaknesses" (array), and "vivaQuestions" (array of objects with keys: "category", "question", "thesisReference", "whatToLookFor").`;
 
-      let metaDataObj = {
-        studentName: "Not Provided",
-        studentId: "Not Provided",
-        thesisTitle: "Not Provided",
-        executiveSummary: "Evaluation complete.",
-        overallGrade: "Satisfactory",
-        keyStrengths: [],
-        keyWeaknesses: [],
-        vivaQuestions: []
-      };
-
-      try {
-        if (aiProvider === 'gemini') {
-          const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
-          const targetApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${effectiveApiKey}`;
-          
-          const metaPayload = {
-            contents: [{ role: "user", parts: [{ text: `${metadataPrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}` }] }],
-            generationConfig: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: "OBJECT",
-                properties: {
-                  studentName: { type: "STRING" },
-                  studentId: { type: "STRING" },
-                  thesisTitle: { type: "STRING" },
-                  executiveSummary: { type: "STRING" },
-                  overallGrade: { type: "STRING" },
-                  keyStrengths: { type: "ARRAY", items: { type: "STRING" } },
-                  keyWeaknesses: { type: "ARRAY", items: { type: "STRING" } },
-                  vivaQuestions: {
-                    type: "ARRAY",
-                    items: {
-                      type: "OBJECT",
-                      properties: {
-                        category: { type: "STRING" },
-                        question: { type: "STRING" },
-                        thesisReference: { type: "STRING" },
-                        whatToLookFor: { type: "STRING" }
-                      },
-                      required: ["category", "question", "thesisReference", "whatToLookFor"]
+        try {
+          if (aiProvider === 'gemini') {
+            const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
+            const targetApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${effectiveApiKey}`;
+            
+            const metaPayload = {
+              contents: [{ role: "user", parts: [{ text: `${metadataPrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}` }] }],
+              generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                  type: "OBJECT",
+                  properties: {
+                    studentName: { type: "STRING" },
+                    studentId: { type: "STRING" },
+                    thesisTitle: { type: "STRING" },
+                    executiveSummary: { type: "STRING" },
+                    overallGrade: { type: "STRING" },
+                    keyStrengths: { type: "ARRAY", items: { type: "STRING" } },
+                    keyWeaknesses: { type: "ARRAY", items: { type: "STRING" } },
+                    vivaQuestions: {
+                      type: "ARRAY",
+                      items: {
+                        type: "OBJECT",
+                        properties: {
+                          category: { type: "STRING" },
+                          question: { type: "STRING" },
+                          thesisReference: { type: "STRING" },
+                          whatToLookFor: { type: "STRING" }
+                        },
+                        required: ["category", "question", "thesisReference", "whatToLookFor"]
+                      }
                     }
                   }
                 }
               }
+            };
+
+            const metaRes = await fetch(targetApiUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(metaPayload) });
+            if (metaRes.ok) {
+              const metaJson = await metaRes.json();
+              const rawMeta = metaJson?.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (rawMeta) metaDataObj = { ...metaDataObj, ...JSON.parse(rawMeta) };
             }
-          };
+          } else {
+            const baseUrl = (openaiBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/+$/, '');
+            const targetApiUrl = `${baseUrl}/chat/completions`;
+            const selectedModel = openaiModel.trim() || 'gpt-4o';
+            const headers = { "Content-Type": "application/json" };
+            if (effectiveApiKey) headers["Authorization"] = `Bearer ${effectiveApiKey}`;
 
-          const metaRes = await fetch(targetApiUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(metaPayload) });
-          if (metaRes.ok) {
-            const metaJson = await metaRes.json();
-            const rawMeta = metaJson?.candidates?.[0]?.content?.parts?.[0]?.text;
-            if (rawMeta) metaDataObj = { ...metaDataObj, ...JSON.parse(rawMeta) };
+            const metaPayload = {
+              model: selectedModel,
+              messages: [
+                { role: "system", content: metadataPrompt },
+                { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}` }
+              ],
+              response_format: { type: "json_object" }
+            };
+
+            const metaRes = await fetch(targetApiUrl, { method: "POST", headers, body: JSON.stringify(metaPayload) });
+            if (metaRes.ok) {
+              const metaJson = await metaRes.json();
+              const rawMeta = metaJson?.choices?.[0]?.message?.content;
+              if (rawMeta) metaDataObj = { ...metaDataObj, ...JSON.parse(rawMeta) };
+            }
           }
-        } else {
-          const baseUrl = (openaiBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/+$/, '');
-          const targetApiUrl = `${baseUrl}/chat/completions`;
-          const selectedModel = openaiModel.trim() || 'gpt-4o';
-          const headers = { "Content-Type": "application/json" };
-          if (effectiveApiKey) headers["Authorization"] = `Bearer ${effectiveApiKey}`;
-
-          const metaPayload = {
-            model: selectedModel,
-            messages: [
-              { role: "system", content: metadataPrompt },
-              { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}` }
-            ],
-            response_format: { type: "json_object" }
-          };
-
-          const metaRes = await fetch(targetApiUrl, { method: "POST", headers, body: JSON.stringify(metaPayload) });
-          if (metaRes.ok) {
-            const metaJson = await metaRes.json();
-            const rawMeta = metaJson?.choices?.[0]?.message?.content;
-            if (rawMeta) metaDataObj = { ...metaDataObj, ...JSON.parse(rawMeta) };
-          }
+        } catch (err) {
+          console.warn('Metadata extraction non-fatal error:', err);
         }
-      } catch (err) {
-        console.warn('Metadata extraction non-fatal error:', err);
+
+        if (metaDataObj.studentName && metaDataObj.studentName !== "Not Provided") setStudentName(metaDataObj.studentName);
+        if (metaDataObj.studentId && metaDataObj.studentId !== "Not Provided") setStudentId(metaDataObj.studentId);
+        if (metaDataObj.thesisTitle && metaDataObj.thesisTitle !== "Not Provided") setThesisTitle(metaDataObj.thesisTitle);
+
+        setAnalysis({
+          ...metaDataObj,
+          criteriaEvaluations: []
+        });
       }
 
-      if (metaDataObj.studentName && metaDataObj.studentName !== "Not Provided") setStudentName(metaDataObj.studentName);
-      if (metaDataObj.studentId && metaDataObj.studentId !== "Not Provided") setStudentId(metaDataObj.studentId);
-      if (metaDataObj.thesisTitle && metaDataObj.thesisTitle !== "Not Provided") setThesisTitle(metaDataObj.thesisTitle);
-
-      const currentEvaluations = [];
-      const updatedScores = {};
-      const updatedJustifications = {};
-      const updatedExpanded = {};
+      const currentEvaluations = [...existingEvaluations];
+      const updatedScores = isResuming ? { ...userScores } : {};
+      const updatedJustifications = isResuming ? { ...userJustifications } : {};
+      const updatedExpanded = isResuming ? { ...expandedItems } : {};
 
       for (let i = 0; i < RUBRIC_CRITERIA.length; i++) {
         const criterion = RUBRIC_CRITERIA[i];
+        if (currentEvaluations.some((e) => e.id === criterion.id)) {
+          setAnalysisProgress({
+            current: i + 1,
+            total: RUBRIC_CRITERIA.length,
+            statusText: `Skipping already evaluated [${criterion.category}] ${criterion.subCriteria}...`
+          });
+          continue;
+        }
         setAnalysisProgress({
           current: i + 1,
           total: RUBRIC_CRITERIA.length,
@@ -792,11 +901,13 @@ Return ONLY valid JSON.`;
       };
 
       setActiveHistoryId(newHistoryId);
+      setHasIncompleteRun(false);
       persistHistory([historyRecord, ...historyList].slice(0, MAX_HISTORY_ITEMS));
 
     } catch (err) {
       console.error(err);
-      setAnalysisError('Evaluation failed: ' + err.message);
+      setHasIncompleteRun(true);
+      setAnalysisError('Evaluation interrupted: ' + err.message);
     } finally {
       setIsAnalyzing(false);
     }
@@ -804,7 +915,7 @@ Return ONLY valid JSON.`;
 
   const totalMarksAndDetails = useMemo(() => {
     let grandTotal = 0;
-    const categoryTotals = {};
+    const categoryTotals: Record<string, { earned: number; max: number }> = {};
 
     RUBRIC_CRITERIA.forEach(c => {
       const score = userScores[c.id] || 0;
@@ -1414,7 +1525,25 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
               )}
             </div>
 
-            <div className="pt-2 flex justify-end">
+            <p className="text-[11px] text-slate-500">
+              Configuration and API keys are saved locally in your browser&apos;s storage.
+            </p>
+
+            <div className="pt-2 flex items-center justify-between gap-3">
+              {(geminiApiKey || openaiApiKey) ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGeminiApiKey('');
+                    setOpenaiApiKey('');
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-red-950/40 hover:bg-red-900/50 text-red-300 border border-red-500/30 text-xs font-semibold transition"
+                >
+                  Clear Saved Keys
+                </button>
+              ) : (
+                <div />
+              )}
               <button
                 onClick={() => setShowApiKeyModal(false)}
                 className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-semibold text-xs"
@@ -1500,27 +1629,45 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
               </span>
             </div>
 
-            <button
-              onClick={() => runThesisAnalysis(extractedText)}
-              disabled={isAnalyzing || !extractedText}
-              className={`w-full sm:w-auto px-6 py-3 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition shadow-lg ${
-                isAnalyzing || !extractedText
-                  ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
-                  : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/30 active:scale-95'
-              }`}
-            >
-              {isAnalyzing ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin text-white" />
-                  Evaluating ({analysisProgress.current}/{analysisProgress.total})...
-                </>
-              ) : (
-                <>
-                  <Award className="w-4 h-4 text-white" />
-                  Evaluate Thesis & Generate Scorecard
-                </>
-              )}
-            </button>
+            {hasIncompleteRun && !isAnalyzing && extractedText ? (
+              <div className="flex flex-wrap items-center gap-2.5 w-full sm:w-auto">
+                <button
+                  onClick={() => runThesisAnalysis(extractedText, { resume: true })}
+                  className="flex-1 sm:flex-initial px-6 py-3 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition shadow-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-600/30 active:scale-95"
+                >
+                  <RefreshCw className="w-4 h-4 text-white" />
+                  Resume ({analysis?.criteriaEvaluations?.length || 0}/{RUBRIC_CRITERIA.length} Done)
+                </button>
+                <button
+                  onClick={() => runThesisAnalysis(extractedText, { resume: false })}
+                  className="px-4 py-3 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700"
+                >
+                  Start Over
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => runThesisAnalysis(extractedText)}
+                disabled={isAnalyzing || !extractedText}
+                className={`w-full sm:w-auto px-6 py-3 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 transition shadow-lg ${
+                  isAnalyzing || !extractedText
+                    ? 'bg-slate-800 text-slate-500 cursor-not-allowed'
+                    : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-600/30 active:scale-95'
+                }`}
+              >
+                {isAnalyzing ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                    Evaluating ({analysisProgress.current}/{analysisProgress.total})...
+                  </>
+                ) : (
+                  <>
+                    <Award className="w-4 h-4 text-white" />
+                    Evaluate Thesis & Generate Scorecard
+                  </>
+                )}
+              </button>
+            )}
           </div>
 
           {isAnalyzing && (
@@ -1542,9 +1689,21 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
           )}
 
           {analysisError && (
-            <div className="mt-4 p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex items-center gap-3">
-              <AlertTriangle className="w-4 h-4 flex-shrink-0 text-red-400" />
-              <span>{analysisError}</span>
+            <div className="mt-4 p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300 text-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <AlertTriangle className="w-4 h-4 flex-shrink-0 text-red-400" />
+                <span>{analysisError}</span>
+              </div>
+              {hasIncompleteRun && !isAnalyzing && extractedText && (
+                <button
+                  type="button"
+                  onClick={() => runThesisAnalysis(extractedText, { resume: true })}
+                  className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs flex items-center gap-1.5 self-start sm:self-auto flex-shrink-0 transition"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Resume ({analysis?.criteriaEvaluations?.length || 0}/{RUBRIC_CRITERIA.length})
+                </button>
+              )}
             </div>
           )}
         </section>
