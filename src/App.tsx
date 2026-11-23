@@ -313,6 +313,7 @@ export default function App() {
   const [reevaluatingItems, setReevaluatingItems] = useState({});
   const [isGeneratingQuestions, setIsGeneratingQuestions] = useState(false);
   const [isRegeneratingSummary, setIsRegeneratingSummary] = useState(false);
+  const [regeneratingSection, setRegeneratingSection] = useState<Record<string, boolean>>({});
   const [questionFilter, setQuestionFilter] = useState('All');
   const [copiedQuestionIdx, setCopiedQuestionIdx] = useState(null);
 
@@ -981,9 +982,38 @@ Return ONLY valid JSON.`;
     setExpandedItems(prev => ({ ...prev, [criterionId]: !prev[criterionId] }));
   };
 
+  const getAnalysisContextText = () => {
+    if (extractedText && extractedText.trim().length > 0) {
+      return extractedText;
+    }
+    if (!analysis) return '';
+
+    const evalDigest = (analysis.criteriaEvaluations || [])
+      .map((ev) => {
+        const spec = RUBRIC_CRITERIA.find((c) => c.id === ev.id);
+        return `[${spec?.category || ev.id}] ${spec?.subCriteria || ''} (Score: ${ev.score}/5)\nJustification: ${ev.justification || ''}\nExcerpt: ${ev.summaryExtract || ''}\nTip: ${ev.improvementTip || ''}`;
+      })
+      .join('\n\n');
+
+    return [
+      `Thesis Title: ${thesisTitle || analysis.thesisTitle || 'N/A'}`,
+      `Student Name: ${studentName || analysis.studentName || 'N/A'}`,
+      `Student ID: ${studentId || analysis.studentId || 'N/A'}`,
+      analysis.projectObjective ? `Project Objective: ${analysis.projectObjective}` : '',
+      analysis.researchQuestions?.length
+        ? `Research Questions:\n${analysis.researchQuestions.map((rq, i) => `${i + 1}. ${rq}`).join('\n')}`
+        : '',
+      analysis.executiveSummary ? `Executive Summary:\n${analysis.executiveSummary}` : '',
+      evalDigest ? `Rubric Evaluation Digest & Excerpts:\n${evalDigest}` : ''
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  };
+
   const recomputeCriterionScore = async (criterionId) => {
     const criterionSpec = RUBRIC_CRITERIA.find(c => c.id === criterionId);
-    if (!criterionSpec || !extractedText) return;
+    const contextText = getAnalysisContextText();
+    if (!criterionSpec || !contextText) return;
 
     if (aiProvider === 'openai' && !openaiApiKey.trim()) {
       setShowApiKeyModal(true);
@@ -1018,7 +1048,7 @@ Return JSON with:
 4. improvementTip: Actionable advice for the student.`;
 
       let newItem;
-      const promptTextCombined = `${singlePrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${extractedText}`;
+      const promptTextCombined = `${singlePrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${contextText}`;
 
       if (aiProvider === 'gemini') {
         const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
@@ -1063,7 +1093,7 @@ Return JSON with:
           model: selectedModel,
           messages: [
             { role: "system", content: singlePrompt + "\n\nReturn ONLY a valid JSON object with keys: score, justification, summaryExtract, improvementTip." },
-            { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${extractedText}` }
+            { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${contextText}` }
           ],
           response_format: { type: "json_object" },
           temperature: 0.2
@@ -1096,7 +1126,8 @@ Return JSON with:
   };
 
   const regenerateSummaryAndMetadata = async () => {
-    if (!extractedText) return;
+    const contextText = getAnalysisContextText();
+    if (!contextText) return;
 
     if (aiProvider === 'openai' && !openaiApiKey.trim()) {
       setShowApiKeyModal(true);
@@ -1108,7 +1139,7 @@ Return JSON with:
     setAnalysisError('');
 
     try {
-      const updatedMeta = await fetchSummaryAndMetadata(extractedText, false);
+      const updatedMeta = await fetchSummaryAndMetadata(contextText, false);
 
       if (updatedMeta.studentName && updatedMeta.studentName !== 'Not Provided') {
         setStudentName(updatedMeta.studentName);
@@ -1150,8 +1181,116 @@ Return JSON with:
     }
   };
 
+  const regenerateSummaryField = async (
+    fieldKey: 'projectObjective' | 'researchQuestions' | 'keyStrengths' | 'keyWeaknesses'
+  ) => {
+    const contextText = getAnalysisContextText();
+    if (!contextText) return;
+
+    if (aiProvider === 'openai' && !openaiApiKey.trim()) {
+      setShowApiKeyModal(true);
+      setAnalysisError('OpenAI API Key is required to regenerate this section.');
+      return;
+    }
+
+    const effectiveApiKey = aiProvider === 'gemini'
+      ? geminiApiKey.trim()
+      : openaiApiKey.trim();
+
+    const sectionConfig = {
+      projectObjective: {
+        label: 'project objective',
+        prompt: 'Extract a clear, concise statement of the main project/research objective from this thesis document text. Return JSON with key "projectObjective" (string).',
+        schema: { projectObjective: { type: 'STRING' } }
+      },
+      researchQuestions: {
+        label: 'research questions',
+        prompt: 'Extract all specific research questions stated or addressed in this thesis document text. Return JSON with key "researchQuestions" (array of strings).',
+        schema: { researchQuestions: { type: 'ARRAY', items: { type: 'STRING' } } }
+      },
+      keyStrengths: {
+        label: 'key strengths',
+        prompt: 'Analyze this thesis document text and identify exactly 3 specific, substantive key strengths of the thesis. Return JSON with key "keyStrengths" (array of 3 strings).',
+        schema: { keyStrengths: { type: 'ARRAY', items: { type: 'STRING' } } }
+      },
+      keyWeaknesses: {
+        label: 'areas for improvement',
+        prompt: 'Analyze this thesis document text and identify exactly 3 specific, actionable areas for improvement in the thesis. Return JSON with key "keyWeaknesses" (array of 3 strings).',
+        schema: { keyWeaknesses: { type: 'ARRAY', items: { type: 'STRING' } } }
+      }
+    }[fieldKey];
+
+    setRegeneratingSection((prev) => ({ ...prev, [fieldKey]: true }));
+    setAnalysisError('');
+
+    try {
+      let parsed: Record<string, any> = {};
+
+      if (aiProvider === 'gemini') {
+        const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
+        const targetApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${effectiveApiKey}`;
+        const payload = {
+          contents: [{ role: 'user', parts: [{ text: `${sectionConfig.prompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${contextText}` }] }],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: 'OBJECT',
+              properties: sectionConfig.schema,
+              required: [fieldKey]
+            }
+          }
+        };
+
+        const res = await fetch(targetApiUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(`Gemini API error (${res.status})`);
+        const data = await res.json();
+        const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        parsed = raw ? JSON.parse(raw) : {};
+      } else {
+        const baseUrl = (openaiBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/+$/, '');
+        const targetApiUrl = `${baseUrl}/chat/completions`;
+        const selectedModel = openaiModel.trim() || 'gpt-4o';
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (effectiveApiKey) headers['Authorization'] = `Bearer ${effectiveApiKey}`;
+
+        const payload = {
+          model: selectedModel,
+          messages: [
+            { role: 'system', content: sectionConfig.prompt },
+            { role: 'user', content: `--- FULL THESIS DOCUMENT TEXT ---\n${contextText}` }
+          ],
+          response_format: { type: 'json_object' }
+        };
+
+        const res = await fetch(targetApiUrl, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload)
+        });
+        if (!res.ok) throw new Error(`OpenAI API error (${res.status})`);
+        const data = await res.json();
+        const raw = data?.choices?.[0]?.message?.content;
+        parsed = raw ? JSON.parse(raw) : {};
+      }
+
+      if (parsed[fieldKey] !== undefined) {
+        setAnalysis((prev) => (prev ? { ...prev, [fieldKey]: parsed[fieldKey] } : prev));
+      }
+    } catch (err) {
+      console.error(err);
+      setAnalysisError(`Failed to regenerate ${sectionConfig.label}: ${err.message}`);
+    } finally {
+      setRegeneratingSection((prev) => ({ ...prev, [fieldKey]: false }));
+    }
+  };
+
   const regenerateVivaQuestions = async () => {
-    if (!extractedText) return;
+    const contextText = getAnalysisContextText();
+    if (!contextText) return;
 
     if (aiProvider === 'openai' && !openaiApiKey.trim()) {
       setShowApiKeyModal(true);
@@ -1184,7 +1323,7 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
         const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
         const targetApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${effectiveApiKey}`;
         const payload = {
-          contents: [{ role: "user", parts: [{ text: `${qPrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${extractedText}` }] }],
+          contents: [{ role: "user", parts: [{ text: `${qPrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${contextText}` }] }],
           generationConfig: {
             responseMimeType: "application/json",
             responseSchema: {
@@ -1229,7 +1368,7 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
           model: selectedModel,
           messages: [
             { role: "system", content: qPrompt },
-            { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${extractedText}` }
+            { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${contextText}` }
           ],
           response_format: { type: "json_object" },
           temperature: 0.4
@@ -1897,8 +2036,8 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
                       <button
                         type="button"
                         onClick={regenerateSummaryAndMetadata}
-                        disabled={isRegeneratingSummary || !extractedText}
-                        title={extractedText ? 'Regenerate summary & metadata' : 'Re-upload PDF to regenerate summary & metadata'}
+                        disabled={isRegeneratingSummary || (!extractedText && !analysis)}
+                        title={extractedText ? 'Regenerate summary & metadata' : 'Regenerate summary & metadata from saved evaluation context'}
                         className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 transition flex items-center gap-1.5 disabled:opacity-40"
                       >
                         <RefreshCw className={`w-3.5 h-3.5 text-indigo-400 ${isRegeneratingSummary ? 'animate-spin' : ''}`} />
@@ -1935,9 +2074,20 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-3.5 space-y-1.5">
-                      <p className="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
-                        <Target className="w-3.5 h-3.5" /> Project Objective
-                      </p>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+                          <Target className="w-3.5 h-3.5" /> Project Objective
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => regenerateSummaryField('projectObjective')}
+                          disabled={regeneratingSection.projectObjective || (!extractedText && !analysis)}
+                          title={extractedText ? 'Regenerate project objective' : 'Regenerate project objective from saved evaluation context'}
+                          className="p-1 rounded-md bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-indigo-300 border border-slate-800 transition disabled:opacity-40"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${regeneratingSection.projectObjective ? 'animate-spin text-indigo-400' : ''}`} />
+                        </button>
+                      </div>
                       <p className="text-xs text-slate-300 leading-relaxed">
                         {analysis.projectObjective && analysis.projectObjective !== 'Not Provided'
                           ? analysis.projectObjective
@@ -1946,9 +2096,20 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
                     </div>
 
                     <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-3.5 space-y-1.5">
-                      <p className="text-xs font-bold text-purple-400 uppercase tracking-wider flex items-center gap-1.5">
-                        <HelpCircle className="w-3.5 h-3.5" /> Research Questions
-                      </p>
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs font-bold text-purple-400 uppercase tracking-wider flex items-center gap-1.5">
+                          <HelpCircle className="w-3.5 h-3.5" /> Research Questions
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => regenerateSummaryField('researchQuestions')}
+                          disabled={regeneratingSection.researchQuestions || (!extractedText && !analysis)}
+                          title={extractedText ? 'Regenerate research questions' : 'Regenerate research questions from saved evaluation context'}
+                          className="p-1 rounded-md bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-purple-300 border border-slate-800 transition disabled:opacity-40"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${regeneratingSection.researchQuestions ? 'animate-spin text-purple-400' : ''}`} />
+                        </button>
+                      </div>
                       {analysis.researchQuestions && analysis.researchQuestions.length > 0 ? (
                         <ol className="text-xs text-slate-300 space-y-1 list-decimal list-inside leading-relaxed">
                           {analysis.researchQuestions.map((rq, idx) => (
@@ -1991,9 +2152,23 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
                         <p className="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-1">
                           <CheckCircle2 className="w-3.5 h-3.5" /> Key Strengths
                         </p>
-                        <span className="text-[11px] text-emerald-300/70 group-hover:text-emerald-300 underline">
-                          View full
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              regenerateSummaryField('keyStrengths');
+                            }}
+                            disabled={regeneratingSection.keyStrengths || (!extractedText && !analysis)}
+                            title={extractedText ? 'Regenerate key strengths' : 'Regenerate key strengths from saved evaluation context'}
+                            className="p-1 rounded-md bg-emerald-950/70 hover:bg-emerald-900/70 text-emerald-300/80 hover:text-emerald-200 border border-emerald-500/20 transition disabled:opacity-40"
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 ${regeneratingSection.keyStrengths ? 'animate-spin text-emerald-300' : ''}`} />
+                          </button>
+                          <span className="text-[11px] text-emerald-300/70 group-hover:text-emerald-300 underline">
+                            View full
+                          </span>
+                        </div>
                       </div>
                       <ul className="text-xs text-emerald-200/90 space-y-1 list-disc list-inside">
                         {analysis.keyStrengths?.map((str, idx) => (
@@ -2029,9 +2204,23 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
                         <p className="text-xs font-bold text-amber-400 uppercase tracking-wider flex items-center gap-1">
                           <AlertTriangle className="w-3.5 h-3.5" /> Areas for Improvement
                         </p>
-                        <span className="text-[11px] text-amber-300/70 group-hover:text-amber-300 underline">
-                          View full
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              regenerateSummaryField('keyWeaknesses');
+                            }}
+                            disabled={regeneratingSection.keyWeaknesses || (!extractedText && !analysis)}
+                            title={extractedText ? 'Regenerate areas for improvement' : 'Regenerate areas for improvement from saved evaluation context'}
+                            className="p-1 rounded-md bg-amber-950/70 hover:bg-amber-900/70 text-amber-300/80 hover:text-amber-200 border border-amber-500/20 transition disabled:opacity-40"
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 ${regeneratingSection.keyWeaknesses ? 'animate-spin text-amber-300' : ''}`} />
+                          </button>
+                          <span className="text-[11px] text-amber-300/70 group-hover:text-amber-300 underline">
+                            View full
+                          </span>
+                        </div>
                       </div>
                       <ul className="text-xs text-amber-200/90 space-y-1 list-disc list-inside">
                         {analysis.keyWeaknesses?.map((wk, idx) => (
@@ -2161,8 +2350,8 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
                   <button
                     type="button"
                     onClick={regenerateVivaQuestions}
-                    disabled={isGeneratingQuestions || !extractedText}
-                    title={extractedText ? 'Generate fresh defense questions' : 'Re-upload PDF to regenerate questions'}
+                    disabled={isGeneratingQuestions || (!extractedText && !analysis)}
+                    title={extractedText ? 'Generate fresh defense questions' : 'Generate defense questions from saved evaluation context'}
                     className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1.5 transition disabled:opacity-40"
                   >
                     <RefreshCw className={`w-3.5 h-3.5 text-indigo-400 ${isGeneratingQuestions ? 'animate-spin' : ''}`} />
@@ -2391,9 +2580,9 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
                           <div className="flex items-center gap-1.5">
                             <button
                               onClick={() => recomputeCriterionScore(criterion.id)}
-                              disabled={reevaluatingItems[criterion.id] || !extractedText}
+                              disabled={reevaluatingItems[criterion.id] || (!extractedText && !analysis)}
                               className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-indigo-400 transition disabled:opacity-40"
-                              title={extractedText ? "Recompute AI score for this item" : "Re-upload PDF to recompute individual AI scores"}
+                              title={extractedText ? "Recompute AI score for this item" : "Recompute AI score from saved evaluation context"}
                             >
                               <RefreshCw className={`w-4 h-4 ${reevaluatingItems[criterion.id] ? 'animate-spin text-indigo-400' : ''}`} />
                             </button>
