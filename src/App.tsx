@@ -324,6 +324,92 @@ const writeStoredHistory = (items) => {
   }
 };
 
+const TEXT_DB_NAME = 'thesis_evaluator_text_db_v1';
+const TEXT_STORE_NAME = 'preprocessed_texts';
+const preprocessedTextCache = new Map<string, string>();
+
+const openTextDb = (): Promise<IDBDatabase | null> => {
+  return new Promise((resolve) => {
+    try {
+      if (!window.indexedDB) {
+        resolve(null);
+        return;
+      }
+      const req = window.indexedDB.open(TEXT_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(TEXT_STORE_NAME)) {
+          db.createObjectStore(TEXT_STORE_NAME);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+};
+
+const savePreprocessedText = async (id: string, text: string) => {
+  if (!id || !text) return;
+  preprocessedTextCache.set(id, text);
+  const db = await openTextDb();
+  if (!db) return;
+  try {
+    const tx = db.transaction(TEXT_STORE_NAME, 'readwrite');
+    tx.objectStore(TEXT_STORE_NAME).put(text, id);
+  } catch {
+    // Ignore IndexedDB write errors in restricted environments
+  }
+};
+
+const loadPreprocessedText = async (id: string): Promise<string> => {
+  if (!id) return '';
+  const cached = preprocessedTextCache.get(id);
+  if (cached) return cached;
+  const db = await openTextDb();
+  if (!db) return '';
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(TEXT_STORE_NAME, 'readonly');
+      const req = tx.objectStore(TEXT_STORE_NAME).get(id);
+      req.onsuccess = () => {
+        const val = typeof req.result === 'string' ? req.result : '';
+        if (val) preprocessedTextCache.set(id, val);
+        resolve(val);
+      };
+      req.onerror = () => resolve('');
+    } catch {
+      resolve('');
+    }
+  });
+};
+
+const deletePreprocessedText = async (id: string) => {
+  if (!id) return;
+  preprocessedTextCache.delete(id);
+  const db = await openTextDb();
+  if (!db) return;
+  try {
+    const tx = db.transaction(TEXT_STORE_NAME, 'readwrite');
+    tx.objectStore(TEXT_STORE_NAME).delete(id);
+  } catch {
+    // Ignore IndexedDB delete errors
+  }
+};
+
+const clearPreprocessedTexts = async () => {
+  preprocessedTextCache.clear();
+  const db = await openTextDb();
+  if (!db) return;
+  try {
+    const tx = db.transaction(TEXT_STORE_NAME, 'readwrite');
+    tx.objectStore(TEXT_STORE_NAME).clear();
+  } catch {
+    // Ignore IndexedDB clear errors
+  }
+};
+
 export default function App() {
   const [extractedText, setExtractedText] = useState('');
   const [fileName, setFileName] = useState('');
@@ -418,7 +504,7 @@ export default function App() {
     });
   }, [activeHistoryId, analysis, userScores, userJustifications, studentName, studentId, thesisTitle, isAnalyzing]);
 
-  const loadHistoryEntry = (entry) => {
+  const loadHistoryEntry = async (entry) => {
     setAnalysis(entry.analysis);
     setUserScores(entry.userScores || {});
     setUserJustifications(entry.userJustifications || {});
@@ -427,18 +513,21 @@ export default function App() {
     setThesisTitle(entry.thesisTitle || '');
     setFileName(entry.fileName || '');
     setPageCount(entry.pageCount || 0);
-    setExtractedText(''); // PDF text is excluded from storage
     setActiveHistoryId(entry.id);
     setExpandedItems({});
     setHasIncompleteRun(false);
     setAnalysisError('');
     setShowHistoryModal(false);
+
+    const rememberedText = entry.preprocessedText || (await loadPreprocessedText(entry.id));
+    setExtractedText(rememberedText || '');
   };
 
   const deleteHistoryEntry = (id, e) => {
     e.stopPropagation();
     const filtered = historyList.filter((item) => item.id !== id);
     persistHistory(filtered);
+    void deletePreprocessedText(id);
     if (activeHistoryId === id) {
       setActiveHistoryId(null);
     }
@@ -446,6 +535,7 @@ export default function App() {
 
   const clearAllHistory = () => {
     persistHistory([]);
+    void clearPreprocessedTexts();
     setActiveHistoryId(null);
   };
 
@@ -497,6 +587,9 @@ export default function App() {
       }
 
       setExtractedText(fullText);
+      if (activeHistoryId) {
+        void savePreprocessedText(activeHistoryId, fullText);
+      }
       setPdfProgress(100);
     } catch (err) {
       console.error(err);
@@ -1053,6 +1146,7 @@ Return ONLY valid JSON.`;
 
       setActiveHistoryId(newHistoryId);
       setHasIncompleteRun(false);
+      void savePreprocessedText(newHistoryId, textToAnalyze);
       persistHistory([historyRecord, ...historyList].slice(0, MAX_HISTORY_ITEMS));
 
     } catch (err) {
