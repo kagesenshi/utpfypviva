@@ -170,26 +170,32 @@ const RUBRIC_CRITERIA = [
 ];
 
 const CRITERION_EXTRA_CONSIDERATIONS: Record<string, string> = {
+  abstract: `
+ADDITIONAL EVALUATION REQUIREMENT:
+- Check whether the abstract's claimed methodology and results are actually realistic and supported by valid data in the thesis. Note: rule-based/physics-based simulated data grounded in real-world behavior is acceptable, but if the thesis relies on arbitrary random data, impossible input-to-output claims, or unsubstantiated results, do NOT award 4 or 5.`,
   methodology: `
-ADDITIONAL EVALUATION REQUIREMENT (SCIENTIFIC VALIDITY, REALISM & FABRICATION CHECK):
-- Audit the methodology for fundamental flaws or "faking it" red flags, including:
-  1. Using random, arbitrary, or ungrounded synthetic/mock data to train or validate ML/statistical models.
-  2. Attempting to generate solutions or predictions from input data/features that realistically cannot contain the information needed to produce the claimed output.
-  3. Data leakage, circular validation, missing critical experimental/implementation steps, or physically/technically impossible claims given the stated tools, datasets, or timeframe.
-- STRICT SCORING CAP: Regardless of how polished or detailed the writing is, if the methodology is fundamentally flawed, relies on random/invalid data, or cannot realistically produce the claimed solution, you MUST cap the score at 2 (or 1 if completely invalid/fabricated). NEVER award 4 or 5 when these flaws exist. Explicitly state whether the methodology is realistic and flag any red flags in your justification.`,
+FORENSIC AUDIT REQUIREMENT (ADVERSARIAL / SKEPTICAL STANCE — ASSUME INVALID UNTIL PROVEN REALISTIC):
+- Do NOT accept buzzwords, flowcharts, or academic-sounding prose at face value. Audit the actual technical substance:
+  1. DATA & INPUT PROVENANCE: Where does the data come from? Note that simulated or mock data IS acceptable if it is generated using documented, realistic real-world rules, physics, or domain behavior. However, it is a CRITICAL FLAW if the thesis uses arbitrary random data (e.g., np.random, rand(), ungrounded random numbers without real-world rules/constraints) or unverified dummy placeholders passed off as real training/validation data.
+  2. INPUT-TO-OUTPUT FEASIBILITY: Can the stated input variables/features realistically, causally, or informationally produce the claimed output/solution? (e.g., predicting complex real-world outcomes from unrelated, insufficient, or purely random inputs is impossible).
+  3. IMPLEMENTATION REALISM: Are there data leakage, circular validation, missing core steps, or physically/technically impossible claims given the stated tools and timeframe?
+- STRICT FAILURE RULE: If ANY of (1), (2), or (3) fails — or if dataset/simulation rules and provenance are missing or hand-waved — you MUST set "hasCriticalFlaw": true, list each concrete issue in "redFlags", and assign a score of 1 or 2 (NEVER 3, 4, or 5).`,
   results_discussion: `
-ADDITIONAL EVALUATION REQUIREMENT (RESULT AUTHENTICITY & METHODOLOGICAL PLAUSIBILITY CHECK):
-- Cross-check the reported results against the stated methodology, inputs, dataset, and sample size to determine whether the results are likely true or made up:
-  1. Can the stated methodology and input data realistically produce these results? (e.g., high accuracy from random/insufficient/unrelated inputs is a major red flag).
-  2. Are there suspiciously perfect or implausible metrics, missing experimental variance/baselines, unsubstantiated claims, or contradictions between the methodology and the reported findings?
-- STRICT SCORING CAP: Even if the discussion and charts look well-written, if the results appear fabricated, cannot realistically follow from the stated methodology/inputs, or are built on an invalid methodology (such as random training data), you MUST cap the score at 2 (or 1 if clearly fabricated/impossible). NEVER award 4 or 5. Explicitly explain in your justification whether the results are credible or suspect.`
+FORENSIC AUDIT REQUIREMENT (ADVERSARIAL / SKEPTICAL STANCE — CHECK IF RESULTS ARE FAKED):
+- Cross-check the reported results against the thesis's actual methodology, input data, and sample size:
+  1. METHODOLOGICAL ACHIEVABILITY: Could the stated methodology and input data realistically produce these exact results? While rule-based/real-world-grounded simulation is valid, if the methodology uses arbitrary random data (without real-world rules/behavior) or inputs that cannot predict the output, any high accuracy or successful results are invalid/meaningless.
+  2. FABRICATION & PLAUSIBILITY RED FLAGS: Are metrics suspiciously high/perfect (e.g., 99-100% with no variance, baselines, or error analysis), contradicted by the methodology, or presented without traceable experimental/simulation evidence?
+- STRICT FAILURE RULE: If the results appear fabricated, unachievable from the stated inputs/method, or built on arbitrary random data or an ungrounded methodology, you MUST set "hasCriticalFlaw": true, list each concrete issue in "redFlags", and assign a score of 1 or 2 (NEVER 3, 4, or 5).`,
+  conclusion_recs: `
+ADDITIONAL EVALUATION REQUIREMENT:
+- Verify whether the conclusions are genuinely earned by valid methodology (including real-world-grounded simulations) and credible results. If the thesis's methodology or results rely on arbitrary random data or are invalid/fabricated, do NOT award 4 or 5.`
 };
 
 const buildCriterionPrompt = (criterion: (typeof RUBRIC_CRITERIA)[number], isRecompute = false) => {
   const extraConsideration = CRITERION_EXTRA_CONSIDERATIONS[criterion.id] || '';
   const actionVerb = isRecompute ? 're-evaluate' : 'evaluate strictly for';
 
-  return `You are a strict, skeptical academic evaluator. Read the full thesis document and ${actionVerb} this ONE specific rubric criterion:
+  return `You are a strict, forensic academic evaluator. Read the full thesis document and ${actionVerb} this ONE specific rubric criterion:
 Item ID: "${criterion.id}"
 Category: "${criterion.category}"
 Sub-criteria: "${criterion.subCriteria}"
@@ -202,16 +208,18 @@ RUBRIC DESCRIPTORS SCALE (1 to 5):
 4: ${criterion.descriptors[4]}
 5: ${criterion.descriptors[5]}${extraConsideration}
 
-GENERAL INTEGRITY RULE: Do NOT reward fluent or academic-sounding prose if the underlying technical logic, data, or evidence is invalid, ungrounded, or fabricated.
+GENERAL INTEGRITY RULE: Do NOT reward fluent, confident, or academic-sounding prose if the underlying technical logic, data source, input-to-output mapping, or evidence is invalid, ungrounded, or fabricated.
 
 Return JSON with keys in this exact order:
-1. validityAudit: First, write a skeptical, evidence-based audit before assigning a score. Check for invalid/random/mock data, inputs that cannot realistically produce the claimed solution, methodological contradictions, or fabricated/implausible results.
-2. hasCriticalFlaw: boolean (true if there is any major realism, validity, or fabrication red flag; otherwise false).
-3. redFlags: array of strings listing each specific flaw or red flag found (empty array [] if none).
-4. justification: Clear, objective academic reasoning for this score based on the thesis content and validity audit.
-5. summaryExtract: Direct verbatim quotes or concise summarized excerpts from the thesis supporting this score.
-6. improvementTip: Specific, actionable advice for the author.
-7. score: integer 1, 2, 3, 4, or 5 (MUST be <= 2 if hasCriticalFlaw is true or redFlags is non-empty for Research Methodology or Result and Discussion).`;
+1. dataAndInputSource: State exactly what input data/datasets/samples are used, their real-world provenance or simulation rules, and whether arbitrary random/ungrounded data is used (note: simulated/mock data grounded in real-world rules and behavior is valid).
+2. inputOutputFeasibility: Analyze whether those exact inputs can realistically and causally produce the claimed solution/results.
+3. validityAudit: Write a skeptical, evidence-based audit summarizing whether the thesis is genuine or faking it.
+4. hasCriticalFlaw: boolean (true if there is any major realism, validity, or fabrication red flag; otherwise false).
+5. redFlags: array of strings listing each specific flaw or red flag found (empty array [] if none).
+6. justification: Clear, objective academic reasoning for this score based on the thesis content and validity audit.
+7. summaryExtract: Direct verbatim quotes or concise summarized excerpts from the thesis supporting this score.
+8. improvementTip: Specific, actionable advice for the author.
+9. score: integer 1, 2, 3, 4, or 5 (MUST be 1 or 2 if hasCriticalFlaw is true or redFlags is non-empty for Research Methodology or Result and Discussion).`;
 };
 
 const getSafeApiKey = (userEnteredKey) => {
@@ -622,6 +630,8 @@ Return JSON format with keys:
           responseSchema: {
             type: 'OBJECT',
             properties: {
+              dataAndInputSource: { type: 'STRING' },
+              inputOutputFeasibility: { type: 'STRING' },
               validityAudit: { type: 'STRING' },
               hasCriticalFlaw: { type: 'BOOLEAN' },
               redFlags: { type: 'ARRAY', items: { type: 'STRING' } },
@@ -630,7 +640,28 @@ Return JSON format with keys:
               improvementTip: { type: 'STRING' },
               score: { type: 'INTEGER' }
             },
-            required: ['validityAudit', 'hasCriticalFlaw', 'redFlags', 'justification', 'summaryExtract', 'improvementTip', 'score']
+            propertyOrdering: [
+              'dataAndInputSource',
+              'inputOutputFeasibility',
+              'validityAudit',
+              'hasCriticalFlaw',
+              'redFlags',
+              'justification',
+              'summaryExtract',
+              'improvementTip',
+              'score'
+            ],
+            required: [
+              'dataAndInputSource',
+              'inputOutputFeasibility',
+              'validityAudit',
+              'hasCriticalFlaw',
+              'redFlags',
+              'justification',
+              'summaryExtract',
+              'improvementTip',
+              'score'
+            ]
           }
         }
       };
@@ -664,7 +695,7 @@ Return JSON format with keys:
             role: 'system',
             content:
               singlePrompt +
-              '\n\nReturn ONLY a valid JSON object with keys in order: validityAudit, hasCriticalFlaw, redFlags, justification, summaryExtract, improvementTip, score.'
+              '\n\nReturn ONLY a valid JSON object with keys in order: dataAndInputSource, inputOutputFeasibility, validityAudit, hasCriticalFlaw, redFlags, justification, summaryExtract, improvementTip, score.'
           },
           { role: 'user', content: `--- FULL THESIS DOCUMENT TEXT ---\n${documentText}` }
         ],
@@ -2522,13 +2553,19 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
                       <div className="p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
                         
                         <div className="flex-1 space-y-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 flex-wrap">
                             <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
                               {criterion.category}
                             </span>
                             <span className="text-[11px] text-slate-400 font-mono">
                               Multiplier: x{criterion.multiplier}
                             </span>
+                            {evalItem.hasCriticalFlaw && (
+                              <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-rose-500/20 text-rose-300 border border-rose-500/40 inline-flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3" />
+                                Validity Red Flag
+                              </span>
+                            )}
                           </div>
                           <h4 className="text-sm font-bold text-white">
                             {criterion.subCriteria}
