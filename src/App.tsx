@@ -191,6 +191,11 @@ ADDITIONAL EVALUATION REQUIREMENT:
 - Verify whether the conclusions are genuinely earned by valid methodology (including real-world-grounded simulations) and credible results. If the thesis's methodology or results rely on arbitrary random data or are invalid/fabricated, do NOT award 4 or 5.`
 };
 
+const getCurrentYearContextNote = () => {
+  const currentYear = new Date().getFullYear();
+  return `CURRENT YEAR & CITATION DATE RULE: The current year is ${currentYear}. Citations, publications, or dates in ${currentYear} or earlier are VALID and MUST NOT be flagged or penalized as "future-dated" or "hallucinated" solely because of their ${currentYear} year. Only treat a year as a future year if it is strictly greater than ${currentYear} (${currentYear + 1} or later).`;
+};
+
 const buildCriterionPrompt = (criterion: (typeof RUBRIC_CRITERIA)[number], isRecompute = false) => {
   const extraConsideration = CRITERION_EXTRA_CONSIDERATIONS[criterion.id] || '';
   const actionVerb = isRecompute ? 're-evaluate' : 'evaluate strictly for';
@@ -207,6 +212,8 @@ RUBRIC DESCRIPTORS SCALE (1 to 5):
 3: ${criterion.descriptors[3]}
 4: ${criterion.descriptors[4]}
 5: ${criterion.descriptors[5]}${extraConsideration}
+
+${getCurrentYearContextNote()}
 
 GENERAL INTEGRITY RULE: Do NOT reward fluent, confident, or academic-sounding prose if the underlying technical logic, data source, input-to-output mapping, or evidence is invalid, ungrounded, or fabricated.
 
@@ -519,7 +526,9 @@ Return JSON format with keys:
 Return JSON format with keys:
 "studentName", "studentId", "thesisTitle", "projectObjective", "researchQuestions" (array of strings), "executiveSummary", "overallGrade", "keyStrengths" (array), and "keyWeaknesses" (array).`;
 
-    const metadataPrompt = `Extract Student Name, Student ID, Thesis Title, Project Objective (a clear, concise statement of the thesis's main project/research objective), and Research Questions (an array of the specific research questions stated or addressed in the thesis) from this thesis document text. Also provide an overall executive summary (2-3 paragraphs), overall letter grade (e.g. A, B+, B, C), key 3 strengths, and key 3 weaknesses${vivaInstruction}`;
+    const metadataPrompt = `Extract Student Name, Student ID, Thesis Title, Project Objective (a clear, concise statement of the thesis's main project/research objective), and Research Questions (an array of the specific research questions stated or addressed in the thesis) from this thesis document text. Also provide an overall executive summary (2-3 paragraphs), overall letter grade (e.g. A, B+, B, C), key 3 strengths, and key 3 weaknesses${vivaInstruction}
+
+${getCurrentYearContextNote()}`;
 
     if (aiProvider === 'gemini') {
       const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
@@ -1332,6 +1341,8 @@ Return ONLY valid JSON.`;
 1. "Understanding": Test whether the student genuinely understands their own methodology, equations, architecture, or analytical choices.
 2. "AI Verification": Detect lazy 100% AI delegation—probe overly generic LLM-style prose, unsubstantiated claims, abrupt tone shifts, or surface-level technical jargon that a student who didn't write the thesis themselves would struggle to defend.
 3. "Clarification": Drill into poorly elaborated, ambiguous, or missing details in the thesis.
+
+${getCurrentYearContextNote()}
 
 Return JSON with key "vivaQuestions", an array of 6 objects each having:
 - "category": strictly "Understanding", "AI Verification", or "Clarification"
