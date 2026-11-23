@@ -3,7 +3,7 @@ import {
   Upload, FileText, CheckCircle2, AlertTriangle, Award, 
   RefreshCw, Edit3, ChevronDown, ChevronUp, Sparkles, BookOpen, 
   BarChart3, Printer, Info, Sliders, Search, Copy, Check,
-  User, Hash, Settings, History, Trash2, Clock, MessageSquare, ShieldAlert, HelpCircle
+  User, Hash, Settings, History, Trash2, Clock, MessageSquare, ShieldAlert, HelpCircle, Target
 } from 'lucide-react';
 
 declare global {
@@ -312,6 +312,7 @@ export default function App() {
   const [expandedItems, setExpandedItems] = useState({});
   const [reevaluatingItems, setReevaluatingItems] = useState({});
   const [isGeneratingQuestions, setIsGeneratingQuestions] = useState(false);
+  const [isRegeneratingSummary, setIsRegeneratingSummary] = useState(false);
   const [questionFilter, setQuestionFilter] = useState('All');
   const [copiedQuestionIdx, setCopiedQuestionIdx] = useState(null);
 
@@ -444,6 +445,112 @@ export default function App() {
     }
   };
 
+  const fetchSummaryAndMetadata = async (textToAnalyze: string, includeVivaQuestions = true) => {
+    const effectiveApiKey = aiProvider === 'gemini'
+      ? geminiApiKey.trim()
+      : openaiApiKey.trim();
+
+    const vivaInstruction = includeVivaQuestions
+      ? `, and 6 targeted oral defense / viva questions to ask the student.
+
+For the 6 viva questions (2 per category), categorize each strictly as one of:
+- "Understanding": Questions that test deep conceptual/technical comprehension of their methodology, design choices, or results.
+- "AI Verification": Questions designed to catch lazy 100% AI delegation (e.g., probing sudden shifts in writing polish, generic buzzwords without concrete implementation specifics, unverified citations, or asking them to walk through exact steps/decisions an AI hallucinated or generalized).
+- "Clarification": Questions targeting vague, under-elaborated, or poorly justified claims in the thesis.
+
+Return JSON format with keys:
+"studentName", "studentId", "thesisTitle", "projectObjective", "researchQuestions" (array of strings), "executiveSummary", "overallGrade", "keyStrengths" (array), "keyWeaknesses" (array), and "vivaQuestions" (array of objects with keys: "category", "question", "thesisReference", "whatToLookFor").`
+      : `.
+
+Return JSON format with keys:
+"studentName", "studentId", "thesisTitle", "projectObjective", "researchQuestions" (array of strings), "executiveSummary", "overallGrade", "keyStrengths" (array), and "keyWeaknesses" (array).`;
+
+    const metadataPrompt = `Extract Student Name, Student ID, Thesis Title, Project Objective (a clear, concise statement of the thesis's main project/research objective), and Research Questions (an array of the specific research questions stated or addressed in the thesis) from this thesis document text. Also provide an overall executive summary (2-3 paragraphs), overall letter grade (e.g. A, B+, B, C), key 3 strengths, and key 3 weaknesses${vivaInstruction}`;
+
+    if (aiProvider === 'gemini') {
+      const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
+      const targetApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${effectiveApiKey}`;
+
+      const properties: Record<string, any> = {
+        studentName: { type: "STRING" },
+        studentId: { type: "STRING" },
+        thesisTitle: { type: "STRING" },
+        projectObjective: { type: "STRING" },
+        researchQuestions: { type: "ARRAY", items: { type: "STRING" } },
+        executiveSummary: { type: "STRING" },
+        overallGrade: { type: "STRING" },
+        keyStrengths: { type: "ARRAY", items: { type: "STRING" } },
+        keyWeaknesses: { type: "ARRAY", items: { type: "STRING" } }
+      };
+
+      if (includeVivaQuestions) {
+        properties.vivaQuestions = {
+          type: "ARRAY",
+          items: {
+            type: "OBJECT",
+            properties: {
+              category: { type: "STRING" },
+              question: { type: "STRING" },
+              thesisReference: { type: "STRING" },
+              whatToLookFor: { type: "STRING" }
+            },
+            required: ["category", "question", "thesisReference", "whatToLookFor"]
+          }
+        };
+      }
+
+      const metaPayload = {
+        contents: [{ role: "user", parts: [{ text: `${metadataPrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}` }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties
+          }
+        }
+      };
+
+      const metaRes = await fetch(targetApiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(metaPayload)
+      });
+      if (!metaRes.ok) {
+        throw new Error(`Gemini API error (${metaRes.status})`);
+      }
+      const metaJson = await metaRes.json();
+      const rawMeta = metaJson?.candidates?.[0]?.content?.parts?.[0]?.text;
+      return rawMeta ? JSON.parse(rawMeta) : {};
+    }
+
+    const baseUrl = (openaiBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/+$/, '');
+    const targetApiUrl = `${baseUrl}/chat/completions`;
+    const selectedModel = openaiModel.trim() || 'gpt-4o';
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (effectiveApiKey) headers["Authorization"] = `Bearer ${effectiveApiKey}`;
+
+    const metaPayload = {
+      model: selectedModel,
+      messages: [
+        { role: "system", content: metadataPrompt },
+        { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}` }
+      ],
+      response_format: { type: "json_object" }
+    };
+
+    const metaRes = await fetch(targetApiUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(metaPayload)
+    });
+    if (!metaRes.ok) {
+      throw new Error(`OpenAI API error (${metaRes.status})`);
+    }
+    const metaJson = await metaRes.json();
+    const rawMeta = metaJson?.choices?.[0]?.message?.content;
+    return rawMeta ? JSON.parse(rawMeta) : {};
+  };
+
   const runThesisAnalysis = async (textToAnalyze, { resume = false } = {}) => {
     if (!textToAnalyze || textToAnalyze.trim().length < 50) {
       setAnalysisError('The thesis text is too short or empty for analysis.');
@@ -490,6 +597,8 @@ export default function App() {
             studentName: analysis.studentName || "Not Provided",
             studentId: analysis.studentId || "Not Provided",
             thesisTitle: analysis.thesisTitle || "Not Provided",
+            projectObjective: analysis.projectObjective || "",
+            researchQuestions: Array.isArray(analysis.researchQuestions) ? analysis.researchQuestions : [],
             executiveSummary: analysis.executiveSummary || "Evaluation complete.",
             overallGrade: analysis.overallGrade || "Satisfactory",
             keyStrengths: Array.isArray(analysis.keyStrengths) ? analysis.keyStrengths : [],
@@ -500,6 +609,8 @@ export default function App() {
             studentName: "Not Provided",
             studentId: "Not Provided",
             thesisTitle: "Not Provided",
+            projectObjective: "",
+            researchQuestions: [],
             executiveSummary: "Evaluation complete.",
             overallGrade: "Satisfactory",
             keyStrengths: [],
@@ -510,81 +621,10 @@ export default function App() {
       if (!isResuming) {
         setAnalysisProgress({ current: 0, total: RUBRIC_CRITERIA.length, statusText: 'Extracting student metadata & summary...' });
 
-        const metadataPrompt = `Extract Student Name, Student ID, and Thesis Title from this thesis document text. Also provide an overall executive summary (2-3 paragraphs), overall letter grade (e.g. A, B+, B, C), key 3 strengths, key 3 weaknesses, and 6 targeted oral defense / viva questions to ask the student.
-
-For the 6 viva questions (2 per category), categorize each strictly as one of:
-- "Understanding": Questions that test deep conceptual/technical comprehension of their methodology, design choices, or results.
-- "AI Verification": Questions designed to catch lazy 100% AI delegation (e.g., probing sudden shifts in writing polish, generic buzzwords without concrete implementation specifics, unverified citations, or asking them to walk through exact steps/decisions an AI hallucinated or generalized).
-- "Clarification": Questions targeting vague, under-elaborated, or poorly justified claims in the thesis.
-
-Return JSON format with keys:
-"studentName", "studentId", "thesisTitle", "executiveSummary", "overallGrade", "keyStrengths" (array), "keyWeaknesses" (array), and "vivaQuestions" (array of objects with keys: "category", "question", "thesisReference", "whatToLookFor").`;
-
         try {
-          if (aiProvider === 'gemini') {
-            const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
-            const targetApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${effectiveApiKey}`;
-            
-            const metaPayload = {
-              contents: [{ role: "user", parts: [{ text: `${metadataPrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}` }] }],
-              generationConfig: {
-                responseMimeType: "application/json",
-                responseSchema: {
-                  type: "OBJECT",
-                  properties: {
-                    studentName: { type: "STRING" },
-                    studentId: { type: "STRING" },
-                    thesisTitle: { type: "STRING" },
-                    executiveSummary: { type: "STRING" },
-                    overallGrade: { type: "STRING" },
-                    keyStrengths: { type: "ARRAY", items: { type: "STRING" } },
-                    keyWeaknesses: { type: "ARRAY", items: { type: "STRING" } },
-                    vivaQuestions: {
-                      type: "ARRAY",
-                      items: {
-                        type: "OBJECT",
-                        properties: {
-                          category: { type: "STRING" },
-                          question: { type: "STRING" },
-                          thesisReference: { type: "STRING" },
-                          whatToLookFor: { type: "STRING" }
-                        },
-                        required: ["category", "question", "thesisReference", "whatToLookFor"]
-                      }
-                    }
-                  }
-                }
-              }
-            };
-
-            const metaRes = await fetch(targetApiUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(metaPayload) });
-            if (metaRes.ok) {
-              const metaJson = await metaRes.json();
-              const rawMeta = metaJson?.candidates?.[0]?.content?.parts?.[0]?.text;
-              if (rawMeta) metaDataObj = { ...metaDataObj, ...JSON.parse(rawMeta) };
-            }
-          } else {
-            const baseUrl = (openaiBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/+$/, '');
-            const targetApiUrl = `${baseUrl}/chat/completions`;
-            const selectedModel = openaiModel.trim() || 'gpt-4o';
-            const headers = { "Content-Type": "application/json" };
-            if (effectiveApiKey) headers["Authorization"] = `Bearer ${effectiveApiKey}`;
-
-            const metaPayload = {
-              model: selectedModel,
-              messages: [
-                { role: "system", content: metadataPrompt },
-                { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}` }
-              ],
-              response_format: { type: "json_object" }
-            };
-
-            const metaRes = await fetch(targetApiUrl, { method: "POST", headers, body: JSON.stringify(metaPayload) });
-            if (metaRes.ok) {
-              const metaJson = await metaRes.json();
-              const rawMeta = metaJson?.choices?.[0]?.message?.content;
-              if (rawMeta) metaDataObj = { ...metaDataObj, ...JSON.parse(rawMeta) };
-            }
+          const extractedMeta = await fetchSummaryAndMetadata(textToAnalyze, true);
+          if (extractedMeta && typeof extractedMeta === 'object') {
+            metaDataObj = { ...metaDataObj, ...extractedMeta };
           }
         } catch (err) {
           console.warn('Metadata extraction non-fatal error:', err);
@@ -1055,6 +1095,61 @@ Return JSON with:
     }
   };
 
+  const regenerateSummaryAndMetadata = async () => {
+    if (!extractedText) return;
+
+    if (aiProvider === 'openai' && !openaiApiKey.trim()) {
+      setShowApiKeyModal(true);
+      setAnalysisError('OpenAI API Key is required to regenerate summary & metadata.');
+      return;
+    }
+
+    setIsRegeneratingSummary(true);
+    setAnalysisError('');
+
+    try {
+      const updatedMeta = await fetchSummaryAndMetadata(extractedText, false);
+
+      if (updatedMeta.studentName && updatedMeta.studentName !== 'Not Provided') {
+        setStudentName(updatedMeta.studentName);
+      }
+      if (updatedMeta.studentId && updatedMeta.studentId !== 'Not Provided') {
+        setStudentId(updatedMeta.studentId);
+      }
+      if (updatedMeta.thesisTitle && updatedMeta.thesisTitle !== 'Not Provided') {
+        setThesisTitle(updatedMeta.thesisTitle);
+      }
+
+      setAnalysis((prev) =>
+        prev
+          ? {
+              ...prev,
+              studentName: updatedMeta.studentName ?? prev.studentName,
+              studentId: updatedMeta.studentId ?? prev.studentId,
+              thesisTitle: updatedMeta.thesisTitle ?? prev.thesisTitle,
+              projectObjective: updatedMeta.projectObjective ?? prev.projectObjective,
+              researchQuestions: Array.isArray(updatedMeta.researchQuestions)
+                ? updatedMeta.researchQuestions
+                : prev.researchQuestions,
+              executiveSummary: updatedMeta.executiveSummary ?? prev.executiveSummary,
+              overallGrade: updatedMeta.overallGrade ?? prev.overallGrade,
+              keyStrengths: Array.isArray(updatedMeta.keyStrengths)
+                ? updatedMeta.keyStrengths
+                : prev.keyStrengths,
+              keyWeaknesses: Array.isArray(updatedMeta.keyWeaknesses)
+                ? updatedMeta.keyWeaknesses
+                : prev.keyWeaknesses
+            }
+          : prev
+      );
+    } catch (err) {
+      console.error(err);
+      setAnalysisError(`Failed to regenerate summary & metadata: ${err.message}`);
+    } finally {
+      setIsRegeneratingSummary(false);
+    }
+  };
+
   const regenerateVivaQuestions = async () => {
     if (!extractedText) return;
 
@@ -1187,6 +1282,16 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
     reportText += `Overall Score: ${totalMarksAndDetails.grandTotal} / 100\n`;
     reportText += `Classification: ${analysis?.overallGrade || 'N/A'}\n\n`;
     reportText += `EXECUTIVE SUMMARY:\n${analysis?.executiveSummary || ''}\n\n`;
+    if (analysis?.projectObjective) {
+      reportText += `PROJECT OBJECTIVE:\n${analysis.projectObjective}\n\n`;
+    }
+    if (analysis?.researchQuestions?.length > 0) {
+      reportText += `RESEARCH QUESTIONS:\n`;
+      analysis.researchQuestions.forEach((rq, idx) => {
+        reportText += `${idx + 1}. ${rq}\n`;
+      });
+      reportText += `\n`;
+    }
     reportText += `RUBRIC BREAKDOWN:\n`;
 
     RUBRIC_CRITERIA.forEach((c) => {
@@ -1788,7 +1893,17 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
                       <BarChart3 className="w-4 h-4 text-indigo-400" />
                       Executive Assessment Summary
                     </h3>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={regenerateSummaryAndMetadata}
+                        disabled={isRegeneratingSummary || !extractedText}
+                        title={extractedText ? 'Regenerate summary & metadata' : 'Re-upload PDF to regenerate summary & metadata'}
+                        className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 transition flex items-center gap-1.5 disabled:opacity-40"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 text-indigo-400 ${isRegeneratingSummary ? 'animate-spin' : ''}`} />
+                        <span>{isRegeneratingSummary ? 'Regenerating...' : 'Regenerate'}</span>
+                      </button>
                       <button
                         onClick={copyFormattedFeedback}
                         className="px-3 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 transition flex items-center gap-1.5"
@@ -1817,6 +1932,36 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
                   <p className="text-xs text-slate-300 leading-relaxed bg-slate-950/60 p-3.5 rounded-xl border border-slate-800">
                     {analysis.executiveSummary}
                   </p>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-3.5 space-y-1.5">
+                      <p className="text-xs font-bold text-indigo-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <Target className="w-3.5 h-3.5" /> Project Objective
+                      </p>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        {analysis.projectObjective && analysis.projectObjective !== 'Not Provided'
+                          ? analysis.projectObjective
+                          : 'Not explicitly stated in the thesis.'}
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-3.5 space-y-1.5">
+                      <p className="text-xs font-bold text-purple-400 uppercase tracking-wider flex items-center gap-1.5">
+                        <HelpCircle className="w-3.5 h-3.5" /> Research Questions
+                      </p>
+                      {analysis.researchQuestions && analysis.researchQuestions.length > 0 ? (
+                        <ol className="text-xs text-slate-300 space-y-1 list-decimal list-inside leading-relaxed">
+                          {analysis.researchQuestions.map((rq, idx) => (
+                            <li key={idx}>{rq}</li>
+                          ))}
+                        </ol>
+                      ) : (
+                        <p className="text-xs text-slate-400">
+                          No explicit research questions identified.
+                        </p>
+                      )}
+                    </div>
+                  </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
                     <div
