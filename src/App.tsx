@@ -204,11 +204,14 @@ RUBRIC DESCRIPTORS SCALE (1 to 5):
 
 GENERAL INTEGRITY RULE: Do NOT reward fluent or academic-sounding prose if the underlying technical logic, data, or evidence is invalid, ungrounded, or fabricated.
 
-Return JSON with:
-1. score: integer 1, 2, 3, 4, or 5.
-2. justification: Clear, objective academic reasoning for this score based on the thesis content.
-3. summaryExtract: Direct verbatim quotes or concise summarized excerpts from the thesis supporting this score.
-4. improvementTip: Specific, actionable advice for the author.`;
+Return JSON with keys in this exact order:
+1. validityAudit: First, write a skeptical, evidence-based audit before assigning a score. Check for invalid/random/mock data, inputs that cannot realistically produce the claimed solution, methodological contradictions, or fabricated/implausible results.
+2. hasCriticalFlaw: boolean (true if there is any major realism, validity, or fabrication red flag; otherwise false).
+3. redFlags: array of strings listing each specific flaw or red flag found (empty array [] if none).
+4. justification: Clear, objective academic reasoning for this score based on the thesis content and validity audit.
+5. summaryExtract: Direct verbatim quotes or concise summarized excerpts from the thesis supporting this score.
+6. improvementTip: Specific, actionable advice for the author.
+7. score: integer 1, 2, 3, 4, or 5 (MUST be <= 2 if hasCriticalFlaw is true or redFlags is non-empty for Research Methodology or Result and Discussion).`;
 };
 
 const getSafeApiKey = (userEnteredKey) => {
@@ -594,6 +597,115 @@ Return JSON format with keys:
     return rawMeta ? JSON.parse(rawMeta) : {};
   };
 
+  const evaluateSingleCriterion = async (
+    criterion: (typeof RUBRIC_CRITERIA)[number],
+    documentText: string,
+    isRecompute = false
+  ) => {
+    const effectiveApiKey = aiProvider === 'gemini'
+      ? geminiApiKey.trim()
+      : openaiApiKey.trim();
+
+    const singlePrompt = buildCriterionPrompt(criterion, isRecompute);
+    const promptTextCombined = `${singlePrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${documentText}`;
+    let parsed: Record<string, any> = {};
+
+    if (aiProvider === 'gemini') {
+      const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
+      const targetApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${effectiveApiKey}`;
+
+      const payload = {
+        contents: [{ role: 'user', parts: [{ text: promptTextCombined }] }],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: 'OBJECT',
+            properties: {
+              validityAudit: { type: 'STRING' },
+              hasCriticalFlaw: { type: 'BOOLEAN' },
+              redFlags: { type: 'ARRAY', items: { type: 'STRING' } },
+              justification: { type: 'STRING' },
+              summaryExtract: { type: 'STRING' },
+              improvementTip: { type: 'STRING' },
+              score: { type: 'INTEGER' }
+            },
+            required: ['validityAudit', 'hasCriticalFlaw', 'redFlags', 'justification', 'summaryExtract', 'improvementTip', 'score']
+          }
+        }
+      };
+
+      const res = await fetch(targetApiUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        const detailedMsg = errJson?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
+        throw new Error(`API Error for "${criterion.subCriteria}": ${detailedMsg}`);
+      }
+
+      const data = await res.json();
+      const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      parsed = raw ? JSON.parse(raw) : {};
+    } else {
+      const baseUrl = (openaiBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/+$/, '');
+      const targetApiUrl = `${baseUrl}/chat/completions`;
+      const selectedModel = openaiModel.trim() || 'gpt-4o';
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (effectiveApiKey) headers['Authorization'] = `Bearer ${effectiveApiKey}`;
+
+      const payload = {
+        model: selectedModel,
+        messages: [
+          {
+            role: 'system',
+            content:
+              singlePrompt +
+              '\n\nReturn ONLY a valid JSON object with keys in order: validityAudit, hasCriticalFlaw, redFlags, justification, summaryExtract, improvementTip, score.'
+          },
+          { role: 'user', content: `--- FULL THESIS DOCUMENT TEXT ---\n${documentText}` }
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.1
+      };
+
+      const res = await fetch(targetApiUrl, { method: 'POST', headers, body: JSON.stringify(payload) });
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        const detailedMsg = errJson?.error?.message || errJson?.message || `HTTP ${res.status}: ${res.statusText}`;
+        throw new Error(`API Error for "${criterion.subCriteria}": ${detailedMsg}`);
+      }
+      const data = await res.json();
+      const raw = data?.choices?.[0]?.message?.content;
+      parsed = raw ? JSON.parse(raw) : {};
+    }
+
+    const redFlags = Array.isArray(parsed.redFlags) ? parsed.redFlags.filter(Boolean) : [];
+    const hasCriticalFlaw = Boolean(parsed.hasCriticalFlaw) || redFlags.length > 0;
+    let finalScore = Math.max(1, Math.min(5, Number(parsed.score) || 3));
+    let finalJustification = parsed.justification || '';
+
+    if ((criterion.id === 'methodology' || criterion.id === 'results_discussion') && hasCriticalFlaw && finalScore > 2) {
+      finalScore = 2;
+      const flagSummary = redFlags.length > 0 ? redFlags.join('; ') : parsed.validityAudit || 'Critical methodological/plausibility flaw detected';
+      finalJustification = `[Score capped at 2/5 due to validity red flag(s): ${flagSummary}]\n\n${finalJustification}`;
+    }
+
+    return {
+      id: criterion.id,
+      validityAudit: parsed.validityAudit || '',
+      hasCriticalFlaw,
+      redFlags,
+      score: finalScore,
+      justification: finalJustification,
+      summaryExtract: parsed.summaryExtract || '',
+      improvementTip: parsed.improvementTip || ''
+    };
+  };
+
   const runThesisAnalysis = async (textToAnalyze, { resume = false } = {}) => {
     if (!textToAnalyze || textToAnalyze.trim().length < 50) {
       setAnalysisError('The thesis text is too short or empty for analysis.');
@@ -704,74 +816,7 @@ Return JSON format with keys:
           statusText: `Evaluating [${criterion.category}] ${criterion.subCriteria}...`
         });
 
-        const singlePrompt = buildCriterionPrompt(criterion, false);
-
-        let evalResult;
-        const promptTextCombined = `${singlePrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}`;
-
-        if (aiProvider === 'gemini') {
-          const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
-          const targetApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${effectiveApiKey}`;
-
-          const payload = {
-            contents: [{ role: "user", parts: [{ text: promptTextCombined }] }],
-            generationConfig: {
-              responseMimeType: "application/json",
-              responseSchema: {
-                type: "OBJECT",
-                properties: {
-                  score: { type: "INTEGER" },
-                  justification: { type: "STRING" },
-                  summaryExtract: { type: "STRING" },
-                  improvementTip: { type: "STRING" }
-                },
-                required: ["score", "justification", "summaryExtract", "improvementTip"]
-              }
-            }
-          };
-
-          const res = await fetch(targetApiUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload)
-          });
-
-          if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            const detailedMsg = errJson?.error?.message || `HTTP ${res.status}: ${res.statusText}`;
-            throw new Error(`API Error for "${criterion.subCriteria}": ${detailedMsg}`);
-          }
-
-          const data = await res.json();
-          const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-          evalResult = { id: criterion.id, ...JSON.parse(raw) };
-
-        } else {
-          const baseUrl = (openaiBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/+$/, '');
-          const targetApiUrl = `${baseUrl}/chat/completions`;
-          const selectedModel = openaiModel.trim() || 'gpt-4o';
-          const headers = { "Content-Type": "application/json" };
-          if (effectiveApiKey) headers["Authorization"] = `Bearer ${effectiveApiKey}`;
-
-          const payload = {
-            model: selectedModel,
-            messages: [
-              { role: "system", content: singlePrompt + "\n\nReturn ONLY a valid JSON object with keys: score, justification, summaryExtract, improvementTip." },
-              { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}` }
-            ],
-            response_format: { type: "json_object" },
-            temperature: 0.2
-          };
-
-          const res = await fetch(targetApiUrl, { method: "POST", headers, body: JSON.stringify(payload) });
-          if (!res.ok) {
-            const errJson = await res.json().catch(() => ({}));
-            const detailedMsg = errJson?.error?.message || errJson?.message || `HTTP ${res.status}: ${res.statusText}`;
-            throw new Error(`API Error for "${criterion.subCriteria}": ${detailedMsg}`);
-          }
-          const data = await res.json();
-          evalResult = { id: criterion.id, ...JSON.parse(data?.choices?.[0]?.message?.content) };
-        }
+        const evalResult = await evaluateSingleCriterion(criterion, textToAnalyze, false);
 
         currentEvaluations.push(evalResult);
         updatedScores[criterion.id] = evalResult.score;
@@ -1016,7 +1061,7 @@ Return ONLY valid JSON.`;
     const evalDigest = (analysis.criteriaEvaluations || [])
       .map((ev) => {
         const spec = RUBRIC_CRITERIA.find((c) => c.id === ev.id);
-        return `[${spec?.category || ev.id}] ${spec?.subCriteria || ''} (Score: ${ev.score}/5)\nJustification: ${ev.justification || ''}\nExcerpt: ${ev.summaryExtract || ''}\nTip: ${ev.improvementTip || ''}`;
+        return `[${spec?.category || ev.id}] ${spec?.subCriteria || ''}\nExcerpt: ${ev.summaryExtract || ''}`;
       })
       .join('\n\n');
 
@@ -1046,72 +1091,10 @@ Return ONLY valid JSON.`;
       return;
     }
 
-    const effectiveApiKey = aiProvider === 'gemini' 
-      ? geminiApiKey.trim()
-      : openaiApiKey.trim();
-
     setReevaluatingItems(prev => ({ ...prev, [criterionId]: true }));
 
     try {
-      const singlePrompt = buildCriterionPrompt(criterionSpec, true);
-
-      let newItem;
-      const promptTextCombined = `${singlePrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${contextText}`;
-
-      if (aiProvider === 'gemini') {
-        const selectedModel = geminiModel.trim() || 'gemini-3-flash-preview';
-        const targetApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${selectedModel}:generateContent?key=${effectiveApiKey}`;
-
-        const payload = {
-          contents: [{ role: "user", parts: [{ text: promptTextCombined }] }],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: "OBJECT",
-              properties: {
-                score: { type: "INTEGER" },
-                justification: { type: "STRING" },
-                summaryExtract: { type: "STRING" },
-                improvementTip: { type: "STRING" }
-              },
-              required: ["score", "justification", "summaryExtract", "improvementTip"]
-            }
-          }
-        };
-
-        const res = await fetch(targetApiUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload)
-        });
-
-        if (!res.ok) throw new Error(`Gemini API error (${res.status})`);
-        const data = await res.json();
-        const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        newItem = { id: criterionId, ...JSON.parse(raw) };
-      } else {
-        const baseUrl = (openaiBaseUrl.trim() || 'https://api.openai.com/v1').replace(/\/+$/, '');
-        const targetApiUrl = `${baseUrl}/chat/completions`;
-        const selectedModel = openaiModel.trim() || 'gpt-4o';
-
-        const headers = { "Content-Type": "application/json" };
-        if (effectiveApiKey) headers["Authorization"] = `Bearer ${effectiveApiKey}`;
-
-        const payload = {
-          model: selectedModel,
-          messages: [
-            { role: "system", content: singlePrompt + "\n\nReturn ONLY a valid JSON object with keys: score, justification, summaryExtract, improvementTip." },
-            { role: "user", content: `--- FULL THESIS DOCUMENT TEXT ---\n${contextText}` }
-          ],
-          response_format: { type: "json_object" },
-          temperature: 0.2
-        };
-
-        const res = await fetch(targetApiUrl, { method: "POST", headers, body: JSON.stringify(payload) });
-        if (!res.ok) throw new Error(`OpenAI API error (${res.status})`);
-        const data = await res.json();
-        newItem = { id: criterionId, ...JSON.parse(data?.choices?.[0]?.message?.content) };
-      }
+      const newItem = await evaluateSingleCriterion(criterionSpec, contextText, true);
 
       setAnalysis(prev => {
         if (!prev) return prev;
