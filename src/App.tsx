@@ -169,6 +169,41 @@ const RUBRIC_CRITERIA = [
   }
 ];
 
+const CRITERION_EXTRA_CONSIDERATIONS: Record<string, string> = {
+  methodology: `
+ADDITIONAL EVALUATION REQUIREMENT (REALISM & PRACTICALITY):
+- Verify whether the methodology is realistic, practical, and technically/logistically feasible to achieve the stated project objective and produce the reported results (consider tools, datasets/samples, equipment, experimental design, and timeframe).
+- Flag any unrealistic assumptions, missing practical steps, or mismatches between the method and the objective/results, and factor this directly into your score and justification.`,
+  results_discussion: `
+ADDITIONAL EVALUATION REQUIREMENT (PLAUSIBILITY & METHODOLOGICAL CONSISTENCY):
+- Cross-check the reported results against the methodology described in the thesis to assess whether the results are likely true, credible, and logically achievable using that methodology.
+- Watch for implausible or overly convenient metrics, results that do not follow from the stated experimental/analytical setup, missing validation details, or contradictions with the methodology, and factor this directly into your score and justification.`
+};
+
+const buildCriterionPrompt = (criterion: (typeof RUBRIC_CRITERIA)[number], isRecompute = false) => {
+  const extraConsideration = CRITERION_EXTRA_CONSIDERATIONS[criterion.id] || '';
+  const actionVerb = isRecompute ? 're-evaluate' : 'evaluate strictly for';
+
+  return `You are a strict academic evaluator. Read the full thesis document and ${actionVerb} this ONE specific rubric criterion:
+Item ID: "${criterion.id}"
+Category: "${criterion.category}"
+Sub-criteria: "${criterion.subCriteria}"
+Multiplier: x${criterion.multiplier} (Max category mark: ${criterion.maxCategoryMarks})
+
+RUBRIC DESCRIPTORS SCALE (1 to 5):
+1: ${criterion.descriptors[1]}
+2: ${criterion.descriptors[2]}
+3: ${criterion.descriptors[3]}
+4: ${criterion.descriptors[4]}
+5: ${criterion.descriptors[5]}${extraConsideration}
+
+Return JSON with:
+1. score: integer 1, 2, 3, 4, or 5.
+2. justification: Clear, objective academic reasoning for this score based on the thesis content.
+3. summaryExtract: Direct verbatim quotes or concise summarized excerpts from the thesis supporting this score.
+4. improvementTip: Specific, actionable advice for the author.`;
+};
+
 const getSafeApiKey = (userEnteredKey) => {
   if (userEnteredKey && userEnteredKey.trim()) {
     return userEnteredKey.trim();
@@ -662,24 +697,7 @@ Return JSON format with keys:
           statusText: `Evaluating [${criterion.category}] ${criterion.subCriteria}...`
         });
 
-        const singlePrompt = `You are a strict academic evaluator. Read the full thesis document and evaluate strictly for this ONE specific rubric criterion:
-Item ID: "${criterion.id}"
-Category: "${criterion.category}"
-Sub-criteria: "${criterion.subCriteria}"
-Multiplier: x${criterion.multiplier} (Max category mark: ${criterion.maxCategoryMarks})
-
-RUBRIC DESCRIPTORS SCALE (1 to 5):
-1: ${criterion.descriptors[1]}
-2: ${criterion.descriptors[2]}
-3: ${criterion.descriptors[3]}
-4: ${criterion.descriptors[4]}
-5: ${criterion.descriptors[5]}
-
-Return JSON with:
-1. score: integer 1, 2, 3, 4, or 5.
-2. justification: Clear, objective academic reasoning for this score based on the thesis content.
-3. summaryExtract: Direct verbatim quotes or concise summarized excerpts from the thesis supporting this score.
-4. improvementTip: Specific, actionable advice for the author.`;
+        const singlePrompt = buildCriterionPrompt(criterion, false);
 
         let evalResult;
         const promptTextCombined = `${singlePrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${textToAnalyze}`;
@@ -1028,24 +1046,7 @@ Return ONLY valid JSON.`;
     setReevaluatingItems(prev => ({ ...prev, [criterionId]: true }));
 
     try {
-      const singlePrompt = `You are a strict academic evaluator. Read the full thesis document and re-evaluate this specific rubric criterion:
-Item ID: "${criterionSpec.id}"
-Category: "${criterionSpec.category}"
-Sub-criteria: "${criterionSpec.subCriteria}"
-Multiplier: x${criterionSpec.multiplier} (Max marks: ${criterionSpec.maxCategoryMarks})
-
-RUBRIC DESCRIPTORS SCALE (1 to 5):
-1: ${criterionSpec.descriptors[1]}
-2: ${criterionSpec.descriptors[2]}
-3: ${criterionSpec.descriptors[3]}
-4: ${criterionSpec.descriptors[4]}
-5: ${criterionSpec.descriptors[5]}
-
-Return JSON with:
-1. score: integer 1, 2, 3, 4, or 5.
-2. justification: Detailed academic reasoning for this score based on thesis content.
-3. summaryExtract: Direct quotes or concise summarized excerpts from text supporting this score.
-4. improvementTip: Actionable advice for the student.`;
+      const singlePrompt = buildCriterionPrompt(criterionSpec, true);
 
       let newItem;
       const promptTextCombined = `${singlePrompt}\n\n--- FULL THESIS DOCUMENT TEXT ---\n${contextText}`;
