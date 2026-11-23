@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { 
   Upload, FileText, CheckCircle2, AlertTriangle, Award, 
   RefreshCw, Edit3, ChevronDown, ChevronUp, Sparkles, BookOpen, 
@@ -414,6 +414,7 @@ export default function App() {
   const [extractedText, setExtractedText] = useState('');
   const [fileName, setFileName] = useState('');
   const [pageCount, setPageCount] = useState(0);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Student metadata
   const [studentName, setStudentName] = useState('');
@@ -539,6 +540,30 @@ export default function App() {
     setActiveHistoryId(null);
   };
 
+  const startNewSession = () => {
+    if (isAnalyzing || isExtractingPdf) return;
+    setExtractedText('');
+    setFileName('');
+    setPageCount(0);
+    setStudentName('');
+    setStudentId('');
+    setThesisTitle('');
+    setAnalysis(null);
+    setUserScores({});
+    setUserJustifications({});
+    setExpandedItems({});
+    setActiveHistoryId(null);
+    setHasIncompleteRun(false);
+    setAnalysisError('');
+    setCategoryFilter('All');
+    setSearchQuery('');
+    setQuestionFilter('All');
+    setInsightDialog(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
   const loadPdfJs = async () => {
     if (window.pdfjsLib) return window.pdfjsLib;
     return new Promise((resolve, reject) => {
@@ -588,7 +613,10 @@ export default function App() {
 
       setExtractedText(fullText);
       if (activeHistoryId) {
-        void savePreprocessedText(activeHistoryId, fullText);
+        const activeEntry = historyList.find((item) => item.id === activeHistoryId);
+        if (activeEntry && activeEntry.fileName === file.name) {
+          void savePreprocessedText(activeHistoryId, fullText);
+        }
       }
       setPdfProgress(100);
     } catch (err) {
@@ -1595,19 +1623,25 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
       {/* HEADER BAR */}
       <header className="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 py-3.5 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="p-2 bg-indigo-600/20 border border-indigo-500/30 rounded-xl text-indigo-400">
+          <button
+            type="button"
+            onClick={startNewSession}
+            disabled={isAnalyzing || isExtractingPdf}
+            title="Start new evaluation session"
+            className="flex items-center gap-3 text-left group focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
+          >
+            <div className="p-2 bg-indigo-600/20 border border-indigo-500/30 rounded-xl text-indigo-400 group-hover:bg-indigo-600/30 transition">
               <Award className="w-6 h-6" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-white tracking-wide">
+              <h1 className="text-lg font-bold text-white group-hover:text-indigo-300 tracking-wide transition">
                 Thesis Rubric Automated Evaluator
               </h1>
               <p className="text-xs text-slate-400">
                 Context-Aware Thesis Document Grading & Evaluation
               </p>
             </div>
-          </div>
+          </button>
 
           <div className="flex items-center gap-2.5">
             <button
@@ -1943,6 +1977,7 @@ Return JSON with key "vivaQuestions", an array of 6 objects each having:
 
           <div className="border-2 border-dashed border-slate-700 hover:border-indigo-500/60 rounded-xl p-8 text-center bg-slate-950/40 transition relative group">
             <input
+              ref={fileInputRef}
               type="file"
               accept=".pdf,application/pdf"
               onChange={handleFileUpload}
