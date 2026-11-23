@@ -171,20 +171,25 @@ const RUBRIC_CRITERIA = [
 
 const CRITERION_EXTRA_CONSIDERATIONS: Record<string, string> = {
   methodology: `
-ADDITIONAL EVALUATION REQUIREMENT (REALISM & PRACTICALITY):
-- Verify whether the methodology is realistic, practical, and technically/logistically feasible to achieve the stated project objective and produce the reported results (consider tools, datasets/samples, equipment, experimental design, and timeframe).
-- Flag any unrealistic assumptions, missing practical steps, or mismatches between the method and the objective/results, and factor this directly into your score and justification.`,
+ADDITIONAL EVALUATION REQUIREMENT (SCIENTIFIC VALIDITY, REALISM & FABRICATION CHECK):
+- Audit the methodology for fundamental flaws or "faking it" red flags, including:
+  1. Using random, arbitrary, or ungrounded synthetic/mock data to train or validate ML/statistical models.
+  2. Attempting to generate solutions or predictions from input data/features that realistically cannot contain the information needed to produce the claimed output.
+  3. Data leakage, circular validation, missing critical experimental/implementation steps, or physically/technically impossible claims given the stated tools, datasets, or timeframe.
+- STRICT SCORING CAP: Regardless of how polished or detailed the writing is, if the methodology is fundamentally flawed, relies on random/invalid data, or cannot realistically produce the claimed solution, you MUST cap the score at 2 (or 1 if completely invalid/fabricated). NEVER award 4 or 5 when these flaws exist. Explicitly state whether the methodology is realistic and flag any red flags in your justification.`,
   results_discussion: `
-ADDITIONAL EVALUATION REQUIREMENT (PLAUSIBILITY & METHODOLOGICAL CONSISTENCY):
-- Cross-check the reported results against the methodology described in the thesis to assess whether the results are likely true, credible, and logically achievable using that methodology.
-- Watch for implausible or overly convenient metrics, results that do not follow from the stated experimental/analytical setup, missing validation details, or contradictions with the methodology, and factor this directly into your score and justification.`
+ADDITIONAL EVALUATION REQUIREMENT (RESULT AUTHENTICITY & METHODOLOGICAL PLAUSIBILITY CHECK):
+- Cross-check the reported results against the stated methodology, inputs, dataset, and sample size to determine whether the results are likely true or made up:
+  1. Can the stated methodology and input data realistically produce these results? (e.g., high accuracy from random/insufficient/unrelated inputs is a major red flag).
+  2. Are there suspiciously perfect or implausible metrics, missing experimental variance/baselines, unsubstantiated claims, or contradictions between the methodology and the reported findings?
+- STRICT SCORING CAP: Even if the discussion and charts look well-written, if the results appear fabricated, cannot realistically follow from the stated methodology/inputs, or are built on an invalid methodology (such as random training data), you MUST cap the score at 2 (or 1 if clearly fabricated/impossible). NEVER award 4 or 5. Explicitly explain in your justification whether the results are credible or suspect.`
 };
 
 const buildCriterionPrompt = (criterion: (typeof RUBRIC_CRITERIA)[number], isRecompute = false) => {
   const extraConsideration = CRITERION_EXTRA_CONSIDERATIONS[criterion.id] || '';
   const actionVerb = isRecompute ? 're-evaluate' : 'evaluate strictly for';
 
-  return `You are a strict academic evaluator. Read the full thesis document and ${actionVerb} this ONE specific rubric criterion:
+  return `You are a strict, skeptical academic evaluator. Read the full thesis document and ${actionVerb} this ONE specific rubric criterion:
 Item ID: "${criterion.id}"
 Category: "${criterion.category}"
 Sub-criteria: "${criterion.subCriteria}"
@@ -196,6 +201,8 @@ RUBRIC DESCRIPTORS SCALE (1 to 5):
 3: ${criterion.descriptors[3]}
 4: ${criterion.descriptors[4]}
 5: ${criterion.descriptors[5]}${extraConsideration}
+
+GENERAL INTEGRITY RULE: Do NOT reward fluent or academic-sounding prose if the underlying technical logic, data, or evidence is invalid, ungrounded, or fabricated.
 
 Return JSON with:
 1. score: integer 1, 2, 3, 4, or 5.
